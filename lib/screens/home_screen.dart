@@ -236,8 +236,10 @@ class _HomeScreenState extends State<HomeScreen> {
             Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (context) =>
-                    ChatScreen(sessionId: sessionId, projectName: project),
+                builder: (context) => ChatScreen(
+                  sessionId: sessionId,
+                  sessionTitle: '$project - $ide',
+                ),
               ),
             );
           },

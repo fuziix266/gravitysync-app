@@ -13,6 +13,11 @@ class SocketService {
   Function(List<dynamic>)? onSessionsUpdated;
   Function(Map<String, dynamic>)? onMessageReceived;
   Function(Map<String, dynamic>)? onChatMessages;
+  Function(Map<String, dynamic>)? onChatHistory;
+  Function(Map<String, dynamic>)?
+  onNewMessage; // Push individual (dedup server-side)
+  Function(Map<String, dynamic>)? onAgentWorking; // Typing indicator ON
+  Function(Map<String, dynamic>)? onAgentIdle; // Typing indicator OFF
   Function(Map<String, dynamic>)? onAvailableActions;
   Function(Map<String, dynamic>)? onActionResult;
 
@@ -53,9 +58,29 @@ class SocketService {
       onMessageReceived?.call(Map<String, dynamic>.from(data));
     });
 
-    // ─── CDP Chat Events ─────────────────────────────────────────
+    // ─── Nuevos eventos (patrón WhatsApp) ─────────────────────────
+
+    // Mensaje nuevo del VPS (ya deduplicado server-side)
+    _socket!.on('new_message', (data) {
+      onNewMessage?.call(Map<String, dynamic>.from(data));
+    });
+
+    // Typing indicator
+    _socket!.on('agent_working', (data) {
+      onAgentWorking?.call(Map<String, dynamic>.from(data));
+    });
+
+    _socket!.on('agent_idle', (data) {
+      onAgentIdle?.call(Map<String, dynamic>.from(data));
+    });
+
+    // ─── Eventos legacy (mantenidos para compatibilidad) ──────────
     _socket!.on('chat_messages', (data) {
       onChatMessages?.call(Map<String, dynamic>.from(data));
+    });
+
+    _socket!.on('chat_history_response', (data) {
+      onChatHistory?.call(Map<String, dynamic>.from(data));
     });
 
     _socket!.on('available_actions', (data) {
@@ -77,9 +102,34 @@ class SocketService {
     });
   }
 
-  // Pedir lectura del chat de una sesión
-  void requestChat(String sessionId) {
-    _socket?.emit('request_chat', {'sessionId': sessionId});
+  // Pedir lectura del chat de una sesión (legacy)
+  void requestChat(
+    String sessionId, {
+    int offset = 0,
+    int limit = 15,
+    bool includeThinking = false,
+  }) {
+    _socket?.emit('request_chat', {
+      'sessionId': sessionId,
+      'offset': offset,
+      'limit': limit,
+      'includeThinking': includeThinking,
+    });
+  }
+
+  // Pedir historial paginado del chat (desde PostgreSQL via VPS)
+  void requestChatHistory(
+    String sessionId, {
+    int offset = 0,
+    int limit = 15,
+    bool includeThinking = false,
+  }) {
+    _socket?.emit('request_chat_history', {
+      'sessionId': sessionId,
+      'offset': offset,
+      'limit': limit,
+      'includeThinking': includeThinking,
+    });
   }
 
   // Pedir botones de acción visibles de una sesión
