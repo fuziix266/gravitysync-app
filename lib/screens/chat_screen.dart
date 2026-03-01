@@ -24,11 +24,13 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
 
   List<Map<String, dynamic>> _messages = [];
+  final Set<String> _knownUuids = {}; // Dedup client-side (patrón Mattermost)
+  Map<String, dynamic>? _streamingMessage; // Mensaje parcial en streaming
   bool _isLoading = true;
   bool _isLoadingMore = false;
   bool _hasMore = false;
-  bool _showThinking = false; // Toggle para mostrar pensamientos
-  bool _isAgentWorking = false; // Typing indicator
+  bool _showThinking = false;
+  bool _isAgentWorking = false;
   int _currentOffset = 0;
   int _total = 0;
   static const int _pageSize = 15;
@@ -42,13 +44,13 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _setupListeners() {
-    // Historial paginado desde PostgreSQL (carga inicial y paginación)
+    // Historial paginado desde PostgreSQL
     _socket.onChatHistory = (data) {
       if (data['sessionId'] != widget.sessionId) return;
       _handleMessages(data, isInitial: _isLoading);
     };
 
-    // Mensaje nuevo individual (dedup server-side, ya filtrado por VPS)
+    // Mensaje nuevo (dedup por UUID client-side + server-side)
     _socket.onNewMessage = (data) {
       if (data['sessionId'] != widget.sessionId) return;
       if (!mounted) return;
@@ -56,43 +58,87 @@ class _ChatScreenState extends State<ChatScreen> {
       final msg = data['message'] as Map<String, dynamic>?;
       if (msg == null) return;
 
+      final uuid = msg['uuid']?.toString() ?? '';
       final type = msg['sectionType'] ?? 'response';
 
-      // Filtrar thinking si el toggle no está activo
+      // DEDUP CLIENT-SIDE: si ya tenemos este UUID, ignorar
+      if (uuid.isNotEmpty && _knownUuids.contains(uuid)) return;
+
+      // Filtrar thinking/status
       if (type == 'thinking' && !_showThinking) return;
-      // Filtrar status siempre
       if (type == 'status') return;
 
       setState(() {
+        if (uuid.isNotEmpty) _knownUuids.add(uuid);
         // Si llega un mensaje de usuario real, eliminar el temporal
         if (type == 'user') {
           _messages.removeWhere((m) => m['id'] == -1);
         }
+        // Si tenemos un streaming message con el mismo UUID, reemplazarlo
+        if (_streamingMessage != null && _streamingMessage!['uuid'] == uuid) {
+          _streamingMessage = null;
+        }
         _messages.add(msg);
-        _isAgentWorking =
-            false; // Si llegó un mensaje, el agente ya no está "trabajando"
+        _isAgentWorking = false;
       });
-
-      // Auto-scroll al final
       _scrollToBottom();
     };
 
-    // Typing indicator: agente trabajando
+    // STREAMING: texto parcial de turno activo
+    _socket.onMessageUpdate = (data) {
+      if (data['sessionId'] != widget.sessionId) return;
+      if (!mounted) return;
+
+      final type = data['sectionType'] ?? 'response';
+      if (type == 'thinking' && !_showThinking) return;
+      if (type == 'status') return;
+
+      setState(() {
+        _streamingMessage = {
+          'uuid': data['uuid'],
+          'sectionType': type,
+          'text': data['text'] ?? '',
+          'hasCode': data['hasCode'] ?? false,
+          'buttons': data['buttons'] ?? [],
+          'isStreaming': true,
+        };
+        _isAgentWorking = true;
+      });
+      _scrollToBottom();
+    };
+
+    // Typing indicator unificado
+    _socket.onAgentTyping = (data) {
+      if (data['sessionId'] != widget.sessionId) return;
+      if (!mounted) return;
+      final status = data['status'] ?? 'idle';
+      setState(() {
+        _isAgentWorking = status == 'working';
+        // Si pasó a idle, limpiar streaming message
+        if (!_isAgentWorking && _streamingMessage != null) {
+          _streamingMessage = null;
+        }
+      });
+      if (_isAgentWorking) _scrollToBottom();
+    };
+
+    // Legacy typing events
     _socket.onAgentWorking = (data) {
       if (data['sessionId'] != widget.sessionId) return;
       if (!mounted) return;
       setState(() => _isAgentWorking = true);
       _scrollToBottom();
     };
-
-    // Typing indicator: agente terminó
     _socket.onAgentIdle = (data) {
       if (data['sessionId'] != widget.sessionId) return;
       if (!mounted) return;
-      setState(() => _isAgentWorking = false);
+      setState(() {
+        _isAgentWorking = false;
+        _streamingMessage = null;
+      });
     };
 
-    // Legacy: respuesta a request_chat (para compatibilidad)
+    // Legacy
     _socket.onChatMessages = (data) {
       if (data['sessionId'] != widget.sessionId) return;
       _handleMessages(data, isInitial: true);
@@ -123,13 +169,28 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages = newMessages
             .map((m) => Map<String, dynamic>.from(m))
             .toList();
+        // Poblar Set de UUIDs conocidos (dedup)
+        _knownUuids.clear();
+        for (final m in _messages) {
+          final uuid = m['uuid']?.toString() ?? '';
+          if (uuid.isNotEmpty) _knownUuids.add(uuid);
+        }
         _isLoading = false;
       } else {
-        final existingIds = _messages.map((m) => m['id']).toSet();
+        final existingUuids = _messages
+            .map((m) => m['uuid']?.toString() ?? '')
+            .toSet();
         final unique = newMessages
-            .where((m) => !existingIds.contains(m['id']))
+            .where((m) {
+              final uuid = m['uuid']?.toString() ?? '';
+              return uuid.isEmpty || !existingUuids.contains(uuid);
+            })
             .map((m) => Map<String, dynamic>.from(m))
             .toList();
+        for (final m in unique) {
+          final uuid = m['uuid']?.toString() ?? '';
+          if (uuid.isNotEmpty) _knownUuids.add(uuid);
+        }
         _messages.insertAll(0, unique);
         _isLoadingMore = false;
       }
@@ -137,17 +198,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _total = total;
     });
 
-    if (isInitial && _messages.isNotEmpty) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
-    }
+    if (isInitial && _messages.isNotEmpty) _scrollToBottom();
   }
 
   void _loadInitialMessages() {
@@ -223,8 +274,10 @@ class _ChatScreenState extends State<ChatScreen> {
     _socket.onChatMessages = null;
     _socket.onChatHistory = null;
     _socket.onNewMessage = null;
+    _socket.onMessageUpdate = null;
     _socket.onAgentWorking = null;
     _socket.onAgentIdle = null;
+    _socket.onAgentTyping = null;
     super.dispose();
   }
 
@@ -334,7 +387,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       horizontal: 12,
                       vertical: 8,
                     ),
-                    itemCount: _messages.length + (_isLoadingMore ? 1 : 0),
+                    itemCount:
+                        _messages.length +
+                        (_isLoadingMore ? 1 : 0) +
+                        (_streamingMessage != null ? 1 : 0),
                     itemBuilder: (context, index) {
                       if (_isLoadingMore && index == 0) {
                         return const Padding(
@@ -350,6 +406,12 @@ class _ChatScreenState extends State<ChatScreen> {
                       }
 
                       final msgIndex = _isLoadingMore ? index - 1 : index;
+
+                      // Streaming message at the end
+                      if (msgIndex >= _messages.length) {
+                        return _buildMessageBubble(_streamingMessage!);
+                      }
+
                       final msg = _messages[msgIndex];
                       return _buildMessageBubble(msg);
                     },
@@ -596,6 +658,14 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  void _stopGeneration() {
+    _socket.stopGeneration(sessionId: widget.sessionId);
+    setState(() {
+      _isAgentWorking = false;
+      _streamingMessage = null;
+    });
+  }
+
   Widget _buildInputBar() {
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
@@ -616,9 +686,13 @@ class _ChatScreenState extends State<ChatScreen> {
                   fontSize: 14,
                 ),
                 decoration: InputDecoration(
-                  hintText: 'Escribe un mensaje...',
+                  hintText: _isAgentWorking
+                      ? 'Antigravity trabajando...'
+                      : 'Escribe un mensaje...',
                   hintStyle: GoogleFonts.inter(
-                    color: AppColors.textSecondary,
+                    color: _isAgentWorking
+                        ? Colors.orange.shade300
+                        : AppColors.textSecondary,
                     fontSize: 14,
                   ),
                   filled: true,
@@ -636,15 +710,22 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(width: 8),
+            // Botón dinámico: SEND o STOP
             Material(
-              color: AppColors.primaryBase,
+              color: _isAgentWorking
+                  ? Colors.red.shade600
+                  : AppColors.primaryBase,
               borderRadius: BorderRadius.circular(24),
               child: InkWell(
                 borderRadius: BorderRadius.circular(24),
-                onTap: _sendMessage,
-                child: const Padding(
-                  padding: EdgeInsets.all(10),
-                  child: Icon(Icons.send, color: Colors.white, size: 20),
+                onTap: _isAgentWorking ? _stopGeneration : _sendMessage,
+                child: Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: Icon(
+                    _isAgentWorking ? Icons.stop : Icons.send,
+                    color: Colors.white,
+                    size: 20,
+                  ),
                 ),
               ),
             ),

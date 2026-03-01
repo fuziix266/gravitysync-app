@@ -14,10 +14,11 @@ class SocketService {
   Function(Map<String, dynamic>)? onMessageReceived;
   Function(Map<String, dynamic>)? onChatMessages;
   Function(Map<String, dynamic>)? onChatHistory;
-  Function(Map<String, dynamic>)?
-  onNewMessage; // Push individual (dedup server-side)
-  Function(Map<String, dynamic>)? onAgentWorking; // Typing indicator ON
-  Function(Map<String, dynamic>)? onAgentIdle; // Typing indicator OFF
+  Function(Map<String, dynamic>)? onNewMessage;
+  Function(Map<String, dynamic>)? onMessageUpdate; // Streaming parcial
+  Function(Map<String, dynamic>)? onAgentWorking;
+  Function(Map<String, dynamic>)? onAgentIdle;
+  Function(Map<String, dynamic>)? onAgentTyping; // Nuevo unificado
   Function(Map<String, dynamic>)? onAvailableActions;
   Function(Map<String, dynamic>)? onActionResult;
 
@@ -53,25 +54,36 @@ class SocketService {
       }
     });
 
-    // Respuestas de Antigravity (file watcher)
-    _socket!.on('mobile_receive', (data) {
-      onMessageReceived?.call(Map<String, dynamic>.from(data));
-    });
+    // ─── Eventos v2.0 (Mattermost-inspired) ────────────────────
 
-    // ─── Nuevos eventos (patrón WhatsApp) ─────────────────────────
-
-    // Mensaje nuevo del VPS (ya deduplicado server-side)
+    // Mensaje nuevo guardado (ya dedup server-side)
     _socket!.on('new_message', (data) {
       onNewMessage?.call(Map<String, dynamic>.from(data));
     });
 
-    // Typing indicator
+    // Streaming: texto parcial de turno activo
+    _socket!.on('message_update', (data) {
+      onMessageUpdate?.call(Map<String, dynamic>.from(data));
+    });
+
+    // Typing indicator (unificado: status working/idle)
+    _socket!.on('agent_typing', (data) {
+      onAgentTyping?.call(Map<String, dynamic>.from(data));
+    });
+
+    // Legacy typing events → redirect al unificado
     _socket!.on('agent_working', (data) {
-      onAgentWorking?.call(Map<String, dynamic>.from(data));
+      final d = Map<String, dynamic>.from(data);
+      d['status'] = 'working';
+      onAgentTyping?.call(d);
+      onAgentWorking?.call(d);
     });
 
     _socket!.on('agent_idle', (data) {
-      onAgentIdle?.call(Map<String, dynamic>.from(data));
+      final d = Map<String, dynamic>.from(data);
+      d['status'] = 'idle';
+      onAgentTyping?.call(d);
+      onAgentIdle?.call(d);
     });
 
     // ─── Eventos legacy (mantenidos para compatibilidad) ──────────
@@ -90,9 +102,14 @@ class SocketService {
     _socket!.on('action_result', (data) {
       onActionResult?.call(Map<String, dynamic>.from(data));
     });
+
+    // Confirmación de mensaje del usuario guardado
+    _socket!.on('message_saved', (data) {
+      onNewMessage?.call(Map<String, dynamic>.from(data));
+    });
   }
 
-  // Enviar comando al chat de una sesión específica
+  // Enviar comando al chat
   void sendCommand(String command, {String? sessionId, String? targetWindow}) {
     _socket?.emit('mobile_command', {
       'command': command,
@@ -102,22 +119,7 @@ class SocketService {
     });
   }
 
-  // Pedir lectura del chat de una sesión (legacy)
-  void requestChat(
-    String sessionId, {
-    int offset = 0,
-    int limit = 15,
-    bool includeThinking = false,
-  }) {
-    _socket?.emit('request_chat', {
-      'sessionId': sessionId,
-      'offset': offset,
-      'limit': limit,
-      'includeThinking': includeThinking,
-    });
-  }
-
-  // Pedir historial paginado del chat (desde PostgreSQL via VPS)
+  // Pedir historial paginado (PostgreSQL via VPS)
   void requestChatHistory(
     String sessionId, {
     int offset = 0,
@@ -132,12 +134,38 @@ class SocketService {
     });
   }
 
-  // Pedir botones de acción visibles de una sesión
+  // Sync por seq (Mattermost pattern)
+  void sync(String sessionId, {int lastSeq = 0}) {
+    _socket?.emit('sync', {'sessionId': sessionId, 'lastSeq': lastSeq});
+  }
+
+  // Detener generación del agente
+  void stopGeneration({String? sessionId}) {
+    _socket?.emit('stop_generation', {
+      'sessionId': sessionId,
+      'timestamp': DateTime.now().toIso8601String(),
+    });
+  }
+
+  // Legacy
+  void requestChat(
+    String sessionId, {
+    int offset = 0,
+    int limit = 15,
+    bool includeThinking = false,
+  }) {
+    _socket?.emit('request_chat', {
+      'sessionId': sessionId,
+      'offset': offset,
+      'limit': limit,
+      'includeThinking': includeThinking,
+    });
+  }
+
   void requestActions(String sessionId) {
     _socket?.emit('request_actions', {'sessionId': sessionId});
   }
 
-  // Ejecutar acción remota (accept, run, etc.)
   void sendRemoteAction(String sessionId, String action) {
     _socket?.emit('remote_action', {'sessionId': sessionId, 'action': action});
   }
