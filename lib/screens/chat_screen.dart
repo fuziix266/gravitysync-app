@@ -107,35 +107,18 @@ class _ChatScreenState extends State<ChatScreen> {
       _scrollToBottom();
     };
 
-    // Typing indicator unificado
+    // Typing indicator unificado (ÚNICO handler — sin legacy duplicados)
     _socket.onAgentTyping = (data) {
       if (data['sessionId'] != widget.sessionId) return;
       if (!mounted) return;
       final status = data['status'] ?? 'idle';
       setState(() {
         _isAgentWorking = status == 'working';
-        // Si pasó a idle, limpiar streaming message
         if (!_isAgentWorking && _streamingMessage != null) {
           _streamingMessage = null;
         }
       });
       if (_isAgentWorking) _scrollToBottom();
-    };
-
-    // Legacy typing events
-    _socket.onAgentWorking = (data) {
-      if (data['sessionId'] != widget.sessionId) return;
-      if (!mounted) return;
-      setState(() => _isAgentWorking = true);
-      _scrollToBottom();
-    };
-    _socket.onAgentIdle = (data) {
-      if (data['sessionId'] != widget.sessionId) return;
-      if (!mounted) return;
-      setState(() {
-        _isAgentWorking = false;
-        _streamingMessage = null;
-      });
     };
 
     // Legacy
@@ -257,7 +240,7 @@ class _ChatScreenState extends State<ChatScreen> {
         'turnIndex': 99999,
         'timestamp': DateTime.now().toIso8601String(),
       });
-      _isAgentWorking = true; // Mostrar "trabajando..." inmediatamente
+      // NO marcar _isAgentWorking aquí — solo cuando el agente REALMENTE empiece
     });
 
     _controller.clear();
@@ -275,8 +258,6 @@ class _ChatScreenState extends State<ChatScreen> {
     _socket.onChatHistory = null;
     _socket.onNewMessage = null;
     _socket.onMessageUpdate = null;
-    _socket.onAgentWorking = null;
-    _socket.onAgentIdle = null;
     _socket.onAgentTyping = null;
     super.dispose();
   }
@@ -390,7 +371,8 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemCount:
                         _messages.length +
                         (_isLoadingMore ? 1 : 0) +
-                        (_streamingMessage != null ? 1 : 0),
+                        (_streamingMessage != null ? 1 : 0) +
+                        (_isAgentWorking ? 1 : 0),
                     itemBuilder: (context, index) {
                       if (_isLoadingMore && index == 0) {
                         return const Padding(
@@ -407,9 +389,44 @@ class _ChatScreenState extends State<ChatScreen> {
 
                       final msgIndex = _isLoadingMore ? index - 1 : index;
 
-                      // Streaming message at the end
-                      if (msgIndex >= _messages.length) {
+                      // Streaming message
+                      if (_streamingMessage != null &&
+                          msgIndex == _messages.length) {
                         return _buildMessageBubble(_streamingMessage!);
+                      }
+
+                      // Typing indicator (DENTRO del ListView para no causar reflow)
+                      if (msgIndex >=
+                          _messages.length +
+                              (_streamingMessage != null ? 1 : 0)) {
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 8,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.green.shade400,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                '🤖 Antigravity está trabajando...',
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  color: Colors.green.shade300,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
                       }
 
                       final msg = _messages[msgIndex];
@@ -417,34 +434,6 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
           ),
-          // Typing indicator
-          if (_isAgentWorking)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-              color: AppColors.surface,
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.green.shade400,
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Text(
-                    '🤖 Antigravity está trabajando...',
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      color: Colors.green.shade300,
-                      fontStyle: FontStyle.italic,
-                    ),
-                  ),
-                ],
-              ),
-            ),
           _buildInputBar(),
         ],
       ),
