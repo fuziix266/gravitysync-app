@@ -77,9 +77,10 @@ class _ChatScreenState extends State<ChatScreen> {
           // DEDUP CLIENT-SIDE: si ya tenemos este UUID, ignorar
           if (uuid.isNotEmpty && _knownUuids.contains(uuid)) return;
 
-          // Filtrar thinking/status
+          // Filtrar thinking/status/no-visible
           if (type == 'thinking' && !_showThinking) return;
           if (type == 'status') return;
+          if (msg['isVisible'] == false) return;
 
           setState(() {
             if (uuid.isNotEmpty) _knownUuids.add(uuid);
@@ -107,6 +108,7 @@ class _ChatScreenState extends State<ChatScreen> {
           final type = data['sectionType'] ?? 'response';
           if (type == 'thinking' && !_showThinking) return;
           if (type == 'status') return;
+          if (data['isVisible'] == false) return;
 
           setState(() {
             _streamingMessage = {
