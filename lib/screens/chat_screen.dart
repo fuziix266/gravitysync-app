@@ -30,7 +30,6 @@ class _ChatScreenState extends State<ChatScreen> {
   StreamSubscription? _newMessageSub;
   StreamSubscription? _messageUpdateSub;
   StreamSubscription? _agentTypingSub;
-  StreamSubscription? _chatMessagesSub;
 
   List<Map<String, dynamic>> _messages = [];
   final Set<String> _knownUuids = {}; // Dedup client-side (patrón Mattermost)
@@ -136,14 +135,6 @@ class _ChatScreenState extends State<ChatScreen> {
             }
           });
           if (_isAgentWorking) _scrollToBottom();
-        });
-
-    // Legacy
-    _chatMessagesSub = _socket.chatMessagesStream
-        .where((data) => data['sessionId'] == widget.sessionId)
-        .listen((data) {
-          if (!mounted) return;
-          _handleMessages(data, isInitial: true);
         });
   }
 
@@ -281,7 +272,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _newMessageSub?.cancel();
     _messageUpdateSub?.cancel();
     _agentTypingSub?.cancel();
-    _chatMessagesSub?.cancel();
+
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _controller.dispose();

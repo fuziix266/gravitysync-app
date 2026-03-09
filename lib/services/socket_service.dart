@@ -22,8 +22,6 @@ class SocketService {
       StreamController<Map<String, dynamic>>.broadcast();
   final _agentTypingController =
       StreamController<Map<String, dynamic>>.broadcast();
-  final _chatMessagesController =
-      StreamController<Map<String, dynamic>>.broadcast();
   final _availableActionsController =
       StreamController<Map<String, dynamic>>.broadcast();
   final _actionResultController =
@@ -38,8 +36,6 @@ class SocketService {
       _messageUpdateController.stream;
   Stream<Map<String, dynamic>> get agentTypingStream =>
       _agentTypingController.stream;
-  Stream<Map<String, dynamic>> get chatMessagesStream =>
-      _chatMessagesController.stream;
   Stream<Map<String, dynamic>> get availableActionsStream =>
       _availableActionsController.stream;
   Stream<Map<String, dynamic>> get actionResultStream =>
@@ -107,11 +103,6 @@ class SocketService {
       _agentTypingController.add(d);
     });
 
-    // ─── Eventos legacy → Streams ─────────────────────────────────
-    _socket!.on('chat_messages', (data) {
-      _chatMessagesController.add(Map<String, dynamic>.from(data));
-    });
-
     _socket!.on('chat_history_response', (data) {
       _chatHistoryController.add(Map<String, dynamic>.from(data));
     });
@@ -132,7 +123,7 @@ class SocketService {
 
   // Enviar comando al chat
   void sendCommand(String command, {String? sessionId, String? targetWindow}) {
-    _socket?.emit('mobile_command', {
+    _socket?.emit('send_command', {
       'command': command,
       'sessionId': sessionId,
       'targetWindow': targetWindow,
@@ -170,21 +161,6 @@ class SocketService {
     _socket?.emit('stop_generation', {
       'sessionId': sessionId,
       'timestamp': DateTime.now().toIso8601String(),
-    });
-  }
-
-  // Legacy
-  void requestChat(
-    String sessionId, {
-    int offset = 0,
-    int limit = 15,
-    bool includeThinking = false,
-  }) {
-    _socket?.emit('request_chat', {
-      'sessionId': sessionId,
-      'offset': offset,
-      'limit': limit,
-      'includeThinking': includeThinking,
     });
   }
 
