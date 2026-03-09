@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_widget_from_html/flutter_widget_from_html.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../services/socket_service.dart';
 import '../theme/app_colors.dart';
@@ -23,6 +25,13 @@ class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
 
+  // Suscripciones a streams (reemplazan callbacks singleton)
+  StreamSubscription? _chatHistorySub;
+  StreamSubscription? _newMessageSub;
+  StreamSubscription? _messageUpdateSub;
+  StreamSubscription? _agentTypingSub;
+  StreamSubscription? _chatMessagesSub;
+
   List<Map<String, dynamic>> _messages = [];
   final Set<String> _knownUuids = {}; // Dedup client-side (patrón Mattermost)
   Map<String, dynamic>? _streamingMessage; // Mensaje parcial en streaming
@@ -30,6 +39,8 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isLoadingMore = false;
   bool _hasMore = false;
   bool _showThinking = false;
+  bool _showCode = true;
+  bool _showResponses = true;
   bool _isAgentWorking = false;
   int _currentOffset = 0;
   int _total = 0;
@@ -44,88 +55,96 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _setupListeners() {
-    // Historial paginado desde PostgreSQL
-    _socket.onChatHistory = (data) {
-      if (data['sessionId'] != widget.sessionId) return;
-      _handleMessages(data, isInitial: _isLoading);
-    };
+    // Historial paginado desde PostgreSQL (filtrado por sessionId)
+    _chatHistorySub = _socket.chatHistoryStream
+        .where((data) => data['sessionId'] == widget.sessionId)
+        .listen((data) {
+          if (!mounted) return;
+          _handleMessages(data, isInitial: _isLoading);
+        });
 
     // Mensaje nuevo (dedup por UUID client-side + server-side)
-    _socket.onNewMessage = (data) {
-      if (data['sessionId'] != widget.sessionId) return;
-      if (!mounted) return;
+    _newMessageSub = _socket.newMessageStream
+        .where((data) => data['sessionId'] == widget.sessionId)
+        .listen((data) {
+          if (!mounted) return;
 
-      final msg = data['message'] as Map<String, dynamic>?;
-      if (msg == null) return;
+          final msg = data['message'] as Map<String, dynamic>?;
+          if (msg == null) return;
 
-      final uuid = msg['uuid']?.toString() ?? '';
-      final type = msg['sectionType'] ?? 'response';
+          final uuid = msg['uuid']?.toString() ?? '';
+          final type = msg['sectionType'] ?? 'response';
 
-      // DEDUP CLIENT-SIDE: si ya tenemos este UUID, ignorar
-      if (uuid.isNotEmpty && _knownUuids.contains(uuid)) return;
+          // DEDUP CLIENT-SIDE: si ya tenemos este UUID, ignorar
+          if (uuid.isNotEmpty && _knownUuids.contains(uuid)) return;
 
-      // Filtrar thinking/status
-      if (type == 'thinking' && !_showThinking) return;
-      if (type == 'status') return;
+          // Filtrar thinking/status
+          if (type == 'thinking' && !_showThinking) return;
+          if (type == 'status') return;
 
-      setState(() {
-        if (uuid.isNotEmpty) _knownUuids.add(uuid);
-        // Si llega un mensaje de usuario real, eliminar el temporal
-        if (type == 'user') {
-          _messages.removeWhere((m) => m['id'] == -1);
-        }
-        // Si tenemos un streaming message con el mismo UUID, reemplazarlo
-        if (_streamingMessage != null && _streamingMessage!['uuid'] == uuid) {
-          _streamingMessage = null;
-        }
-        _messages.add(msg);
-        _isAgentWorking = false;
-      });
-      _scrollToBottom();
-    };
+          setState(() {
+            if (uuid.isNotEmpty) _knownUuids.add(uuid);
+            // Si llega un mensaje de usuario real, eliminar el temporal
+            if (type == 'user') {
+              _messages.removeWhere((m) => m['id'] == -1);
+            }
+            // Si tenemos un streaming message con el mismo UUID, reemplazarlo
+            if (_streamingMessage != null &&
+                _streamingMessage!['uuid'] == uuid) {
+              _streamingMessage = null;
+            }
+            _messages.add(msg);
+            _isAgentWorking = false;
+          });
+          _scrollToBottom();
+        });
 
     // STREAMING: texto parcial de turno activo
-    _socket.onMessageUpdate = (data) {
-      if (data['sessionId'] != widget.sessionId) return;
-      if (!mounted) return;
+    _messageUpdateSub = _socket.messageUpdateStream
+        .where((data) => data['sessionId'] == widget.sessionId)
+        .listen((data) {
+          if (!mounted) return;
 
-      final type = data['sectionType'] ?? 'response';
-      if (type == 'thinking' && !_showThinking) return;
-      if (type == 'status') return;
+          final type = data['sectionType'] ?? 'response';
+          if (type == 'thinking' && !_showThinking) return;
+          if (type == 'status') return;
 
-      setState(() {
-        _streamingMessage = {
-          'uuid': data['uuid'],
-          'sectionType': type,
-          'text': data['text'] ?? '',
-          'hasCode': data['hasCode'] ?? false,
-          'buttons': data['buttons'] ?? [],
-          'isStreaming': true,
-        };
-        _isAgentWorking = true;
-      });
-      _scrollToBottom();
-    };
+          setState(() {
+            _streamingMessage = {
+              'uuid': data['uuid'],
+              'sectionType': type,
+              'text': data['text'] ?? '',
+              'hasCode': data['hasCode'] ?? false,
+              'buttons': data['buttons'] ?? [],
+              'isStreaming': true,
+            };
+            _isAgentWorking = true;
+          });
+          _scrollToBottom();
+        });
 
-    // Typing indicator unificado (ÚNICO handler — sin legacy duplicados)
-    _socket.onAgentTyping = (data) {
-      if (data['sessionId'] != widget.sessionId) return;
-      if (!mounted) return;
-      final status = data['status'] ?? 'idle';
-      setState(() {
-        _isAgentWorking = status == 'working';
-        if (!_isAgentWorking && _streamingMessage != null) {
-          _streamingMessage = null;
-        }
-      });
-      if (_isAgentWorking) _scrollToBottom();
-    };
+    // Typing indicator unificado
+    _agentTypingSub = _socket.agentTypingStream
+        .where((data) => data['sessionId'] == widget.sessionId)
+        .listen((data) {
+          if (!mounted) return;
+          final status = data['status'] ?? 'idle';
+          setState(() {
+            _isAgentWorking = status == 'working';
+            if (!_isAgentWorking && _streamingMessage != null) {
+              _streamingMessage = null;
+            }
+          });
+          if (_isAgentWorking) _scrollToBottom();
+        });
 
     // Legacy
-    _socket.onChatMessages = (data) {
-      if (data['sessionId'] != widget.sessionId) return;
-      _handleMessages(data, isInitial: true);
-    };
+    _chatMessagesSub = _socket.chatMessagesStream
+        .where((data) => data['sessionId'] == widget.sessionId)
+        .listen((data) {
+          if (!mounted) return;
+          _handleMessages(data, isInitial: true);
+        });
   }
 
   void _scrollToBottom() {
@@ -185,6 +204,9 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _loadInitialMessages() {
+    print(
+      '[FLUTTER-DBG] _loadInitialMessages pidiendo historial para sessionId=${widget.sessionId}',
+    );
     // Cargar desde PostgreSQL via VPS
     _socket.requestChatHistory(
       widget.sessionId,
@@ -206,14 +228,17 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  void _toggleThinking() {
-    setState(() {
-      _showThinking = !_showThinking;
-      _isLoading = true;
-      _messages.clear();
-      _currentOffset = 0;
-    });
-    _loadInitialMessages();
+  /// Filtrar mensajes según toggles activos
+  List<Map<String, dynamic>> get _filteredMessages {
+    return _messages.where((msg) {
+      final type = msg['sectionType'] ?? 'response';
+      final hasCode = msg['hasCode'] == true;
+      if (type == 'thinking' && !_showThinking) return false;
+      if (type == 'status') return false;
+      if (type == 'response' && hasCode && !_showCode) return false;
+      if (type == 'response' && !hasCode && !_showResponses) return false;
+      return true;
+    }).toList();
   }
 
   void _onScroll() {
@@ -251,14 +276,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    // Cancelar suscripciones a streams (cada ChatScreen limpia las suyas)
+    _chatHistorySub?.cancel();
+    _newMessageSub?.cancel();
+    _messageUpdateSub?.cancel();
+    _agentTypingSub?.cancel();
+    _chatMessagesSub?.cancel();
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _controller.dispose();
-    _socket.onChatMessages = null;
-    _socket.onChatHistory = null;
-    _socket.onNewMessage = null;
-    _socket.onMessageUpdate = null;
-    _socket.onAgentTyping = null;
     super.dispose();
   }
 
@@ -293,28 +319,109 @@ class _ChatScreenState extends State<ChatScreen> {
           ],
         ),
         actions: [
-          // Toggle thinking
-          IconButton(
-            icon: Icon(
-              _showThinking ? Icons.psychology : Icons.psychology_outlined,
-              color: _showThinking
-                  ? Colors.purple.shade300
-                  : AppColors.textSecondary,
-            ),
-            tooltip: _showThinking
-                ? 'Ocultar pensamientos'
-                : 'Mostrar pensamientos',
-            onPressed: _toggleThinking,
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh, color: AppColors.textSecondary),
-            onPressed: () {
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.menu, color: AppColors.textSecondary),
+            color: AppColors.surface,
+            onSelected: (value) {
               setState(() {
-                _isLoading = true;
-                _currentOffset = 0;
+                switch (value) {
+                  case 'thinking':
+                    _showThinking = !_showThinking;
+                    _isLoading = true;
+                    _currentOffset = 0;
+                    _loadInitialMessages();
+                    break;
+                  case 'code':
+                    _showCode = !_showCode;
+                    break;
+                  case 'responses':
+                    _showResponses = !_showResponses;
+                    break;
+                  case 'refresh':
+                    _isLoading = true;
+                    _currentOffset = 0;
+                    _loadInitialMessages();
+                    break;
+                }
               });
-              _loadInitialMessages();
             },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: 'thinking',
+                child: Row(
+                  children: [
+                    Icon(
+                      _showThinking
+                          ? Icons.check_box
+                          : Icons.check_box_outline_blank,
+                      color: Colors.purple.shade300,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Pensamiento',
+                      style: TextStyle(color: AppColors.textPrimary),
+                    ),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'code',
+                child: Row(
+                  children: [
+                    Icon(
+                      _showCode
+                          ? Icons.check_box
+                          : Icons.check_box_outline_blank,
+                      color: Colors.orange,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Código / Comandos',
+                      style: TextStyle(color: AppColors.textPrimary),
+                    ),
+                  ],
+                ),
+              ),
+              PopupMenuItem(
+                value: 'responses',
+                child: Row(
+                  children: [
+                    Icon(
+                      _showResponses
+                          ? Icons.check_box
+                          : Icons.check_box_outline_blank,
+                      color: AppColors.statusOnline,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Respuestas',
+                      style: TextStyle(color: AppColors.textPrimary),
+                    ),
+                  ],
+                ),
+              ),
+              const PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'refresh',
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.refresh,
+                      color: AppColors.textSecondary,
+                      size: 20,
+                    ),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Recargar mensajes',
+                      style: TextStyle(color: AppColors.textPrimary),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -369,7 +476,7 @@ class _ChatScreenState extends State<ChatScreen> {
                       vertical: 8,
                     ),
                     itemCount:
-                        _messages.length +
+                        _filteredMessages.length +
                         (_isLoadingMore ? 1 : 0) +
                         (_streamingMessage != null ? 1 : 0) +
                         (_isAgentWorking ? 1 : 0),
@@ -388,16 +495,17 @@ class _ChatScreenState extends State<ChatScreen> {
                       }
 
                       final msgIndex = _isLoadingMore ? index - 1 : index;
+                      final filtered = _filteredMessages;
 
                       // Streaming message
                       if (_streamingMessage != null &&
-                          msgIndex == _messages.length) {
+                          msgIndex == filtered.length) {
                         return _buildMessageBubble(_streamingMessage!);
                       }
 
-                      // Typing indicator (DENTRO del ListView para no causar reflow)
+                      // Typing indicator
                       if (msgIndex >=
-                          _messages.length +
+                          filtered.length +
                               (_streamingMessage != null ? 1 : 0)) {
                         return Padding(
                           padding: const EdgeInsets.symmetric(
@@ -429,13 +537,114 @@ class _ChatScreenState extends State<ChatScreen> {
                         );
                       }
 
-                      final msg = _messages[msgIndex];
+                      final msg = filtered[msgIndex];
                       return _buildMessageBubble(msg);
                     },
                   ),
           ),
           _buildInputBar(),
         ],
+      ),
+    );
+  }
+
+  /// Construir contenido del mensaje: HTML si disponible, Markdown como fallback
+  Widget _buildMessageContent(Map<String, dynamic> msg, bool isThinking) {
+    final text = msg['text'] ?? '';
+    final html = msg['html'] ?? '';
+    final textColor = isThinking
+        ? Colors.purple.shade200
+        : AppColors.textPrimary;
+
+    // Si hay HTML limpio del DOM, renderizar con HtmlWidget
+    if (html.toString().isNotEmpty && html.toString().length > 10) {
+      // Envolver en un div con estilos base para tema oscuro
+      final styledHtml =
+          '''
+        <style>
+          body { color: #E0E0E0; font-family: Inter, sans-serif; font-size: 13px; line-height: 1.6; }
+          h1, h2, h3, h4 { color: #F5F5F5; margin: 8px 0 4px 0; }
+          h1 { font-size: 18px; } h2 { font-size: 16px; } h3 { font-size: 14px; }
+          p { margin: 4px 0; }
+          code { background: rgba(0,0,0,0.3); color: #FFB74D; padding: 2px 4px; border-radius: 3px; font-family: 'Fira Code', monospace; font-size: 12px; }
+          pre { background: rgba(0,0,0,0.4); padding: 12px; border-radius: 8px; overflow-x: auto; }
+          pre code { background: none; padding: 0; }
+          table { border-collapse: collapse; width: 100%; margin: 8px 0; }
+          th, td { border: 1px solid #555; padding: 6px 10px; text-align: left; font-size: 12px; }
+          th { background: rgba(255,255,255,0.1); color: #F5F5F5; font-weight: 600; }
+          tr:nth-child(even) { background: rgba(255,255,255,0.03); }
+          blockquote { border-left: 3px solid #888; padding-left: 12px; color: #AAAAAA; font-style: italic; }
+          a { color: #64B5F6; }
+          ul, ol { padding-left: 20px; }
+          li { margin: 2px 0; }
+          strong { color: #F5F5F5; }
+          em { color: #BDBDBD; }
+          hr { border: none; border-top: 1px solid #555; margin: 12px 0; }
+          .diff-add { color: #81C784; } .diff-del { color: #E57373; }
+        </style>
+        <div>${html.toString()}</div>
+      ''';
+
+      return HtmlWidget(
+        styledHtml,
+        textStyle: GoogleFonts.inter(
+          fontSize: 13,
+          color: textColor,
+          height: 1.5,
+        ),
+        customStylesBuilder: (element) {
+          // Aplicar fondo oscuro a bloques de código
+          if (element.localName == 'pre') {
+            return {
+              'background-color': 'rgba(0,0,0,0.35)',
+              'border-radius': '8px',
+              'padding': '12px',
+            };
+          }
+          return null;
+        },
+      );
+    }
+
+    // Fallback: Markdown para mensajes legacy sin HTML
+    return MarkdownBody(
+      data: text.length > 2000 ? '${text.substring(0, 2000)}...' : text,
+      selectable: true,
+      styleSheet: MarkdownStyleSheet(
+        p: GoogleFonts.inter(fontSize: 13, color: textColor, height: 1.5),
+        code: GoogleFonts.firaCode(
+          fontSize: 12,
+          color: Colors.orange.shade300,
+          backgroundColor: Colors.black26,
+        ),
+        codeblockDecoration: BoxDecoration(
+          color: Colors.black26,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        h1: GoogleFonts.inter(
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+          color: AppColors.textPrimary,
+        ),
+        h2: GoogleFonts.inter(
+          fontSize: 16,
+          fontWeight: FontWeight.bold,
+          color: AppColors.textPrimary,
+        ),
+        h3: GoogleFonts.inter(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+          color: AppColors.textPrimary,
+        ),
+        listBullet: GoogleFonts.inter(
+          fontSize: 13,
+          color: AppColors.textSecondary,
+        ),
+        blockquote: GoogleFonts.inter(
+          fontSize: 13,
+          fontStyle: FontStyle.italic,
+          color: AppColors.textSecondary,
+        ),
       ),
     );
   }
@@ -553,57 +762,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   ],
                 ),
               ),
-              // Content
+              // Content — usa HTML si disponible, Markdown como fallback
               Padding(
                 padding: const EdgeInsets.fromLTRB(12, 6, 12, 8),
-                child: MarkdownBody(
-                  data: text.length > 2000
-                      ? '${text.substring(0, 2000)}...'
-                      : text,
-                  selectable: true,
-                  styleSheet: MarkdownStyleSheet(
-                    p: GoogleFonts.inter(
-                      fontSize: 13,
-                      color: isThinking
-                          ? Colors.purple.shade200
-                          : AppColors.textPrimary,
-                      height: 1.5,
-                    ),
-                    code: GoogleFonts.firaCode(
-                      fontSize: 12,
-                      color: Colors.orange.shade300,
-                      backgroundColor: Colors.black26,
-                    ),
-                    codeblockDecoration: BoxDecoration(
-                      color: Colors.black26,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    h1: GoogleFonts.inter(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.textPrimary,
-                    ),
-                    h2: GoogleFonts.inter(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.textPrimary,
-                    ),
-                    h3: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: AppColors.textPrimary,
-                    ),
-                    listBullet: GoogleFonts.inter(
-                      fontSize: 13,
-                      color: AppColors.textSecondary,
-                    ),
-                    blockquote: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontStyle: FontStyle.italic,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                ),
+                child: _buildMessageContent(msg, isThinking),
               ),
               // Action buttons
               if (buttons.isNotEmpty)

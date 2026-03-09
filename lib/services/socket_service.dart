@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:flutter/foundation.dart';
 
@@ -8,19 +9,41 @@ class SocketService {
 
   IO.Socket? _socket;
 
-  // Callbacks reactivos
+  // ─── Callbacks simples (sin conflicto de routing) ────────────────
   Function(bool)? onConnectionStatusChanged;
   Function(List<dynamic>)? onSessionsUpdated;
-  Function(Map<String, dynamic>)? onMessageReceived;
-  Function(Map<String, dynamic>)? onChatMessages;
-  Function(Map<String, dynamic>)? onChatHistory;
-  Function(Map<String, dynamic>)? onNewMessage;
-  Function(Map<String, dynamic>)? onMessageUpdate; // Streaming parcial
-  Function(Map<String, dynamic>)? onAgentWorking;
-  Function(Map<String, dynamic>)? onAgentIdle;
-  Function(Map<String, dynamic>)? onAgentTyping; // Nuevo unificado
-  Function(Map<String, dynamic>)? onAvailableActions;
-  Function(Map<String, dynamic>)? onActionResult;
+
+  // ─── Streams broadcast (múltiples listeners simultáneos) ─────────
+  final _chatHistoryController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _newMessageController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _messageUpdateController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _agentTypingController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _chatMessagesController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _availableActionsController =
+      StreamController<Map<String, dynamic>>.broadcast();
+  final _actionResultController =
+      StreamController<Map<String, dynamic>>.broadcast();
+
+  // ─── Streams públicos ────────────────────────────────────────────
+  Stream<Map<String, dynamic>> get chatHistoryStream =>
+      _chatHistoryController.stream;
+  Stream<Map<String, dynamic>> get newMessageStream =>
+      _newMessageController.stream;
+  Stream<Map<String, dynamic>> get messageUpdateStream =>
+      _messageUpdateController.stream;
+  Stream<Map<String, dynamic>> get agentTypingStream =>
+      _agentTypingController.stream;
+  Stream<Map<String, dynamic>> get chatMessagesStream =>
+      _chatMessagesController.stream;
+  Stream<Map<String, dynamic>> get availableActionsStream =>
+      _availableActionsController.stream;
+  Stream<Map<String, dynamic>> get actionResultStream =>
+      _actionResultController.stream;
 
   final String myEmail = "admin@mavoo.cl";
   final String vpsUrl = "http://62.146.181.70:3001";
@@ -47,65 +70,63 @@ class SocketService {
       onConnectionStatusChanged?.call(false);
     });
 
-    // Sesiones CDP del agente
+    // Sesiones CDP del agente (callback simple — solo HomeScreen lo usa)
     _socket!.on('sessions_list', (data) {
       if (data['sessions'] != null) {
         onSessionsUpdated?.call(data['sessions'] as List<dynamic>);
       }
     });
 
-    // ─── Eventos v2.0 (Mattermost-inspired) ────────────────────
+    // ─── Eventos v2.0 (Mattermost-inspired) → Streams ─────────────
 
     // Mensaje nuevo guardado (ya dedup server-side)
     _socket!.on('new_message', (data) {
-      onNewMessage?.call(Map<String, dynamic>.from(data));
+      _newMessageController.add(Map<String, dynamic>.from(data));
     });
 
     // Streaming: texto parcial de turno activo
     _socket!.on('message_update', (data) {
-      onMessageUpdate?.call(Map<String, dynamic>.from(data));
+      _messageUpdateController.add(Map<String, dynamic>.from(data));
     });
 
     // Typing indicator (unificado: status working/idle)
     _socket!.on('agent_typing', (data) {
-      onAgentTyping?.call(Map<String, dynamic>.from(data));
+      _agentTypingController.add(Map<String, dynamic>.from(data));
     });
 
-    // Legacy typing events → redirect al unificado
+    // Legacy typing events → redirect al stream unificado
     _socket!.on('agent_working', (data) {
       final d = Map<String, dynamic>.from(data);
       d['status'] = 'working';
-      onAgentTyping?.call(d);
-      onAgentWorking?.call(d);
+      _agentTypingController.add(d);
     });
 
     _socket!.on('agent_idle', (data) {
       final d = Map<String, dynamic>.from(data);
       d['status'] = 'idle';
-      onAgentTyping?.call(d);
-      onAgentIdle?.call(d);
+      _agentTypingController.add(d);
     });
 
-    // ─── Eventos legacy (mantenidos para compatibilidad) ──────────
+    // ─── Eventos legacy → Streams ─────────────────────────────────
     _socket!.on('chat_messages', (data) {
-      onChatMessages?.call(Map<String, dynamic>.from(data));
+      _chatMessagesController.add(Map<String, dynamic>.from(data));
     });
 
     _socket!.on('chat_history_response', (data) {
-      onChatHistory?.call(Map<String, dynamic>.from(data));
+      _chatHistoryController.add(Map<String, dynamic>.from(data));
     });
 
     _socket!.on('available_actions', (data) {
-      onAvailableActions?.call(Map<String, dynamic>.from(data));
+      _availableActionsController.add(Map<String, dynamic>.from(data));
     });
 
     _socket!.on('action_result', (data) {
-      onActionResult?.call(Map<String, dynamic>.from(data));
+      _actionResultController.add(Map<String, dynamic>.from(data));
     });
 
-    // Confirmación de mensaje del usuario guardado
+    // Confirmación de mensaje del usuario guardado → mismo stream que new_message
     _socket!.on('message_saved', (data) {
-      onNewMessage?.call(Map<String, dynamic>.from(data));
+      _newMessageController.add(Map<String, dynamic>.from(data));
     });
   }
 
@@ -137,6 +158,11 @@ class SocketService {
   // Sync por seq (Mattermost pattern)
   void sync(String sessionId, {int lastSeq = 0}) {
     _socket?.emit('sync', {'sessionId': sessionId, 'lastSeq': lastSeq});
+  }
+
+  // Solicitar lista de sesiones al VPS (pull activo)
+  void requestSessions() {
+    _socket?.emit('request_sessions', {});
   }
 
   // Detener generación del agente
@@ -174,5 +200,7 @@ class SocketService {
     _socket?.disconnect();
     _socket?.dispose();
     _socket = null;
+    // No cerrar los StreamControllers — el singleton persiste
+    // y otros widgets pueden suscribirse después
   }
 }

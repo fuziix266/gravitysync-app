@@ -13,7 +13,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final SocketService _socketService = SocketService();
   bool _isConnected = false;
-  List<dynamic> _sessions = []; // Sesiones CDP reales
+  List<dynamic> _sessions = [];
 
   @override
   void initState() {
@@ -25,7 +25,12 @@ class _HomeScreenState extends State<HomeScreen> {
     _socketService.init();
 
     _socketService.onConnectionStatusChanged = (status) {
-      if (mounted) setState(() => _isConnected = status);
+      if (mounted) {
+        setState(() => _isConnected = status);
+        if (status) {
+          _socketService.requestSessions();
+        }
+      }
     };
 
     _socketService.onSessionsUpdated = (list) {
@@ -35,6 +40,15 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     };
+
+    if (_socketService.isConnected) {
+      _socketService.requestSessions();
+    }
+  }
+
+  Future<void> _refreshSessions() async {
+    _socketService.requestSessions();
+    await Future.delayed(const Duration(milliseconds: 1500));
   }
 
   @override
@@ -133,7 +147,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     vertical: 2,
                   ),
                   decoration: BoxDecoration(
-                    color: AppColors.primaryBase.withOpacity(0.1),
+                    color: AppColors.primaryBase.withAlpha(26),
                     borderRadius: BorderRadius.circular(10),
                   ),
                   child: Text(
@@ -151,7 +165,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
           const SizedBox(height: 8),
 
-          // Lista de Sesiones CDP
+          // Lista de Sesiones CDP con pull-to-refresh
           Expanded(
             child: _sessions.isEmpty
                 ? Center(
@@ -161,31 +175,52 @@ class _HomeScreenState extends State<HomeScreen> {
                         Icon(
                           _isConnected ? Icons.search : Icons.cloud_off,
                           size: 48,
-                          color: AppColors.textMuted.withOpacity(0.5),
+                          color: AppColors.textMuted.withAlpha(128),
                         ),
                         const SizedBox(height: 16),
                         Text(
                           _isConnected
-                              ? 'Buscando ventanas de Antigravity...\nAsegúrate de tener Antigravity abierto con\n--remote-debugging-port=9004'
-                              : 'Conectando con el agente local...',
+                              ? 'No hay sesiones disponibles.\nDesliza hacia abajo para recargar.'
+                              : 'Conectando con el servidor...',
                           textAlign: TextAlign.center,
                           style: const TextStyle(color: AppColors.textMuted),
                         ),
+                        if (_isConnected) ...[
+                          const SizedBox(height: 16),
+                          ElevatedButton.icon(
+                            onPressed: () => _socketService.requestSessions(),
+                            icon: const Icon(Icons.refresh, size: 18),
+                            label: const Text('Recargar sesiones'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.primaryBase,
+                              foregroundColor: Colors.white,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(20),
+                              ),
+                            ),
+                          ),
+                        ],
                       ],
                     ),
                   )
-                : ListView.builder(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    itemCount: _sessions.length,
-                    itemBuilder: (context, index) {
-                      final session = _sessions[index];
-                      return _buildSessionCard(
-                        sessionId: session['id'] ?? '',
-                        project: session['project'] ?? 'Unknown',
-                        ide: session['ide'] ?? 'Unknown',
-                        title: session['title'] ?? '',
-                      );
-                    },
+                : RefreshIndicator(
+                    onRefresh: _refreshSessions,
+                    color: AppColors.primaryBase,
+                    child: ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      itemCount: _sessions.length,
+                      itemBuilder: (context, index) {
+                        final session = _sessions[index];
+                        return _buildSessionCard(
+                          sessionId: session['id'] ?? '',
+                          project: session['project'] ?? 'Unknown',
+                          ide: session['ide'] ?? 'Unknown',
+                          title: session['title'] ?? '',
+                          messageCount: session['messageCount'] ?? 0,
+                          lastMessage: session['lastMessage'] ?? '',
+                        );
+                      },
+                    ),
                   ),
           ),
         ],
@@ -198,6 +233,8 @@ class _HomeScreenState extends State<HomeScreen> {
     required String project,
     required String ide,
     required String title,
+    int messageCount = 0,
+    String lastMessage = '',
   }) {
     // Color del ícono según IDE
     Color ideColor;
@@ -314,9 +351,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        title.length > 50
-                            ? '${title.substring(0, 50)}...'
-                            : title,
+                        messageCount > 0
+                            ? '$messageCount mensajes'
+                            : (title.length > 50
+                                  ? '${title.substring(0, 50)}...'
+                                  : title),
                         style: const TextStyle(
                           color: AppColors.textMuted,
                           fontSize: 11,
