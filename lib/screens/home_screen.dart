@@ -168,38 +168,19 @@ class _HomeScreenState extends State<HomeScreen> {
           // Lista de Sesiones CDP con pull-to-refresh
           Expanded(
             child: _sessions.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
+                ? RefreshIndicator(
+                    onRefresh: _refreshSessions,
+                    color: AppColors.primaryBase,
+                    child: ListView(
                       children: [
-                        Icon(
-                          _isConnected ? Icons.search : Icons.cloud_off,
-                          size: 48,
-                          color: AppColors.textMuted.withAlpha(128),
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          _isConnected
-                              ? 'No hay sesiones disponibles.\nDesliza hacia abajo para recargar.'
-                              : 'Conectando con el servidor...',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(color: AppColors.textMuted),
-                        ),
-                        if (_isConnected) ...[
-                          const SizedBox(height: 16),
-                          ElevatedButton.icon(
-                            onPressed: () => _socketService.requestSessions(),
-                            icon: const Icon(Icons.refresh, size: 18),
-                            label: const Text('Recargar sesiones'),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: AppColors.primaryBase,
-                              foregroundColor: Colors.white,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                            ),
+                        SizedBox(
+                          height: MediaQuery.of(context).size.height * 0.55,
+                          child: Center(
+                            child: _isConnected
+                                ? _buildNoSessionsState()
+                                : _buildDisconnectedState(),
                           ),
-                        ],
+                        ),
                       ],
                     ),
                   )
@@ -222,6 +203,134 @@ class _HomeScreenState extends State<HomeScreen> {
                       },
                     ),
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Estado vacío: conectado pero sin sesiones CDP activas
+  Widget _buildNoSessionsState() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Ícono con efecto glassmorphism
+          Container(
+            width: 88,
+            height: 88,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  AppColors.primaryBase.withAlpha(40),
+                  Colors.purple.withAlpha(30),
+                ],
+              ),
+              border: Border.all(
+                color: AppColors.primaryBase.withAlpha(60),
+                width: 1.5,
+              ),
+            ),
+            child: Icon(
+              Icons.desktop_access_disabled_rounded,
+              size: 40,
+              color: AppColors.primaryBase.withAlpha(180),
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'No hay instancias de Antigravity\nabiertas en tu equipo',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Abre Antigravity en tu computador\npara ver las sesiones de chat aquí.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.textMuted.withAlpha(200),
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 24),
+          OutlinedButton.icon(
+            onPressed: () => _socketService.requestSessions(),
+            icon: const Icon(Icons.refresh, size: 16),
+            label: const Text('Buscar sesiones'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppColors.primaryBase,
+              side: BorderSide(color: AppColors.primaryBase.withAlpha(100)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Estado vacío: desconectado del VPS
+  Widget _buildDisconnectedState() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 88,
+            height: 88,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Colors.red.withAlpha(20),
+              border: Border.all(color: Colors.red.withAlpha(60), width: 1.5),
+            ),
+            child: const Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(Icons.cloud_off_rounded, size: 36, color: Colors.red),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Conectando con el servidor...',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'Verificando conexión con el VPS.\nEsto puede tomar unos segundos.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: AppColors.textMuted.withAlpha(200),
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+          const SizedBox(height: 24),
+          const SizedBox(
+            width: 24,
+            height: 24,
+            child: CircularProgressIndicator(
+              strokeWidth: 2.5,
+              color: AppColors.primaryBase,
+            ),
           ),
         ],
       ),
